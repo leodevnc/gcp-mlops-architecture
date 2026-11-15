@@ -38,12 +38,16 @@ Run the workflow tests with `uv run --locked python -m unittest discover -s test
 
 The continuous training pipeline reads a versioned snapshot of the input CSV, validates and splits the data, trains a candidate, and evaluates it on the holdout. A passing run publishes an approved model version and its evaluation report. The pipeline can run on demand or on a recurring Vertex AI schedule. [Runbook](docs/level1.md)
 
+## Release Level 2 through CI/CD
+
+GitHub Actions tests each PR and builds the worker container. With staging credentials and variables configured, a push to the main branch releases the verified image and KFP template to Artifact Registry and validates the release in Vertex AI. [CI/CD setup](docs/level2.md)
+
 ## Implementation stages
 
 | Google Cloud maturity level | Repository scope |
 | --- | --- |
 | 0 · Manual process | Local commands for data preparation, training, holdout validation, and prediction. |
 | 1 · ML pipeline automation | Vertex AI Pipelines, scheduled retraining, ML Metadata, and gated publication to Model Registry. |
-| 2 · CI/CD pipeline automation | Planned build, testing, and release of versioned pipeline components and definitions. |
+| 2 · CI/CD pipeline automation | PR tests and container build, followed by a versioned staging release and a quality-gated Vertex AI run. |
 
 The stages follow the [Google Cloud Architecture Center guide to MLOps CI, CD, and CT](https://docs.cloud.google.com/architecture/mlops-continuous-delivery-and-automation-pipelines-in-machine-learning?hl=ko).
