@@ -42,6 +42,10 @@ The continuous training pipeline reads a versioned snapshot of the input CSV, va
 
 GitHub Actions tests each PR and builds the worker container. With staging credentials and variables configured, a push to the main branch releases the verified image and KFP template to Artifact Registry and validates the release in Vertex AI. [CI/CD setup](docs/level2.md)
 
+## Run Level 2 on AWS
+
+The AWS reference stack uses CodePipeline and CodeBuild to test and release a digest-pinned ECR worker to SageMaker Pipelines. It validates each release on the sample dataset and can schedule retraining on the validated version. [AWS setup](docs/aws-level2.md)
+
 ## Implementation stages
 
 | Google Cloud maturity level | Repository scope |
