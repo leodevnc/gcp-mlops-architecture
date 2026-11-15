@@ -1,11 +1,16 @@
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from .schemas import DeliveryFeatures, LinearModel
 
 
-def create_app(model: LinearModel) -> FastAPI:
+class VertexRequest(BaseModel):
+    instances: list[DeliveryFeatures] = Field(min_length=1)
+
+
+def create_app(model: LinearModel, *, vertex: bool = False) -> FastAPI:
     app = FastAPI(title="Delivery Time Prediction")
 
     @app.exception_handler(RequestValidationError)
@@ -22,8 +27,20 @@ def create_app(model: LinearModel) -> FastAPI:
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.post("/predict")
-    def predict(features: DeliveryFeatures) -> dict[str, float]:
-        return {"delivery_minutes": model.predict(features)}
+    if vertex:
+
+        @app.post("/predict")
+        def predict_batch(request: VertexRequest) -> dict[str, list[dict[str, float]]]:
+            return {
+                "predictions": [
+                    {"delivery_minutes": model.predict(features)} for features in request.instances
+                ]
+            }
+
+    else:
+
+        @app.post("/predict")
+        def predict(features: DeliveryFeatures) -> dict[str, float]:
+            return {"delivery_minutes": model.predict(features)}
 
     return app

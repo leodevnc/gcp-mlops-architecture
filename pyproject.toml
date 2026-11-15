@@ -12,3 +12,8 @@ dependencies = [
 
 [dependency-groups]
 dev = ["httpx2==2.16.0"]
+gcp = [
+    "google-cloud-aiplatform==2.9.0",
+    "google-cloud-storage==3.17.1",
+    "kfp==2.18.0",
+]

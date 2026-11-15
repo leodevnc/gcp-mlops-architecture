@@ -34,12 +34,16 @@ The CSV requires at least 12 rows. Each row contains a distance greater than zer
 
 Run the workflow tests with `uv run --locked python -m unittest discover -s tests -v`.
 
+## Run Level 1 on Google Cloud
+
+The continuous training pipeline reads a versioned snapshot of the input CSV, validates and splits the data, trains a candidate, and evaluates it on the holdout. A passing run publishes an approved model version and its evaluation report. The pipeline can run on demand or on a recurring Vertex AI schedule. [Runbook](docs/level1.md)
+
 ## Implementation stages
 
 | Google Cloud maturity level | Repository scope |
 | --- | --- |
 | 0 · Manual process | Local commands for data preparation, training, holdout validation, and prediction. |
-| 1 · ML pipeline automation | Planned cloud pipeline with scheduled retraining, validation gates, run metadata, and model promotion. |
+| 1 · ML pipeline automation | Vertex AI Pipelines, scheduled retraining, ML Metadata, and gated publication to Model Registry. |
 | 2 · CI/CD pipeline automation | Planned build, testing, and release of versioned pipeline components and definitions. |
 
 The stages follow the [Google Cloud Architecture Center guide to MLOps CI, CD, and CT](https://docs.cloud.google.com/architecture/mlops-continuous-delivery-and-automation-pipelines-in-machine-learning?hl=ko).
