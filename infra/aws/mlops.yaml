@@ -1,0 +1,409 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AWS Level 2 continuous integration and delivery for the delivery-time model.
+
+Parameters:
+  NamePrefix:
+    Type: String
+    Default: delivery-mlops
+    AllowedPattern: "[a-z][a-z0-9-]{0,30}[a-z0-9]"
+  ConnectionArn:
+    Type: String
+    AllowedPattern: "arn:[a-z0-9-]+:(codeconnections|codestar-connections):[a-z0-9-]+:[0-9]{12}:connection/[a-zA-Z0-9-]+"
+    Description: ARN of an available AWS CodeConnections GitHub connection.
+  SourceRepository:
+    Type: String
+    Default: leodevnc/gcp-mlops-architecture
+    AllowedPattern: "[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+"
+  SourceBranch:
+    Type: String
+    Default: feat/aws-level-2
+    MinLength: 1
+  DatasetKey:
+    Type: String
+    Default: datasets/deliveries.csv
+    AllowedPattern: "datasets/[a-zA-Z0-9_./-]+[.]csv"
+  RetrainingExpression:
+    Type: String
+    Default: ""
+    Description: EventBridge Scheduler rate or cron expression. Set after uploading the dataset.
+  RetrainingTimezone:
+    Type: String
+    Default: Asia/Seoul
+
+Resources:
+  ArtifactKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Encrypts the CodePipeline artifacts bucket.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+  PipelineArtifacts:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: "aws:kms"
+              KMSMasterKeyID: !GetAtt ArtifactKey.Arn
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+  ModelArtifacts:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+  WorkerRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${NamePrefix}-worker"
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+  ProductionModels:
+    Type: AWS::SageMaker::ModelPackageGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ModelPackageGroupName: !Sub "${NamePrefix}-models"
+      ModelPackageGroupDescription: Models registered by continuous training.
+  StagingModels:
+    Type: AWS::SageMaker::ModelPackageGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ModelPackageGroupName: !Sub "${NamePrefix}-validation"
+      ModelPackageGroupDescription: Models registered during release validation on the sample dataset.
+
+  ProcessingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: sagemaker.amazonaws.com}
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: RunProcessing
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ["s3:GetBucketLocation", "s3:ListBucket"]
+                Resource: !GetAtt ModelArtifacts.Arn
+              - Effect: Allow
+                Action: ["s3:GetObject", "s3:GetObjectVersion"]
+                Resource:
+                  - !Sub "${ModelArtifacts.Arn}/${DatasetKey}"
+                  - !Sub "${ModelArtifacts.Arn}/staging/*"
+              - Effect: Allow
+                Action: ["s3:PutObject", "s3:AbortMultipartUpload"]
+                Resource: !Sub "${ModelArtifacts.Arn}/runs/*"
+              - Effect: Allow
+                Action: "ecr:GetAuthorizationToken"
+                Resource: "*"
+              - Effect: Allow
+                Action: ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
+                Resource: !GetAtt WorkerRepository.Arn
+              - Effect: Allow
+                Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:DescribeLogStreams", "logs:PutLogEvents"]
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/sagemaker/ProcessingJobs*"
+  TrainingPipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: sagemaker.amazonaws.com}
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: RunTrainingPipeline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "iam:PassRole"
+                Resource: !GetAtt ProcessingRole.Arn
+                Condition:
+                  StringEquals: {"iam:PassedToService": sagemaker.amazonaws.com}
+              - Effect: Allow
+                Action:
+                  - "sagemaker:CreateProcessingJob"
+                  - "sagemaker:DescribeProcessingJob"
+                  - "sagemaker:StopProcessingJob"
+                  - "sagemaker:AddTags"
+                Resource: !Sub "arn:${AWS::Partition}:sagemaker:${AWS::Region}:${AWS::AccountId}:processing-job/pipelines-*"
+              - Effect: Allow
+                Action: ["sagemaker:CreateModelPackage", "sagemaker:DescribeModelPackageGroup", "sagemaker:DescribeModelPackage", "sagemaker:AddTags"]
+                Resource:
+                  - !GetAtt ProductionModels.ModelPackageGroupArn
+                  - !GetAtt StagingModels.ModelPackageGroupArn
+                  - !Sub "arn:${AWS::Partition}:sagemaker:${AWS::Region}:${AWS::AccountId}:model-package/${NamePrefix}-models/*"
+                  - !Sub "arn:${AWS::Partition}:sagemaker:${AWS::Region}:${AWS::AccountId}:model-package/${NamePrefix}-validation/*"
+              - Effect: Allow
+                Action: "s3:GetObject"
+                Resource: !Sub "${ModelArtifacts.Arn}/runs/*"
+              - Effect: Allow
+                Action: "ecr:GetAuthorizationToken"
+                Resource: "*"
+              - Effect: Allow
+                Action: ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
+                Resource: !GetAtt WorkerRepository.Arn
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: scheduler.amazonaws.com}
+            Action: "sts:AssumeRole"
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref AWS::AccountId
+              ArnEquals:
+                "aws:SourceArn": !Sub "arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule-group/default"
+      Policies:
+        - PolicyName: StartScheduledTraining
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "sagemaker:StartPipelineExecution"
+                Resource: !Sub "arn:${AWS::Partition}:sagemaker:${AWS::Region}:${AWS::AccountId}:pipeline/${NamePrefix}-training"
+  BuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: codebuild.amazonaws.com}
+            Action: "sts:AssumeRole"
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref AWS::AccountId
+              ArnEquals:
+                "aws:SourceArn": !Sub "arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${NamePrefix}-release"
+      Policies:
+        - PolicyName: BuildAndRelease
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${NamePrefix}-release*"
+              - Effect: Allow
+                Action: ["s3:GetBucketLocation", "s3:GetBucketAcl"]
+                Resource: !GetAtt PipelineArtifacts.Arn
+              - Effect: Allow
+                Action: ["s3:GetObject", "s3:GetObjectVersion"]
+                Resource: !Sub "${PipelineArtifacts.Arn}/*"
+              - Effect: Allow
+                Action: ["kms:Decrypt", "kms:DescribeKey"]
+                Resource: !GetAtt ArtifactKey.Arn
+              - Effect: Allow
+                Action: "s3:PutObject"
+                Resource:
+                  - !Sub "${ModelArtifacts.Arn}/staging/*"
+                  - !Sub "${ModelArtifacts.Arn}/releases/*"
+              - Effect: Allow
+                Action: "ecr:GetAuthorizationToken"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "ecr:BatchCheckLayerAvailability"
+                  - "ecr:BatchGetImage"
+                  - "ecr:CompleteLayerUpload"
+                  - "ecr:DescribeImages"
+                  - "ecr:GetDownloadUrlForLayer"
+                  - "ecr:InitiateLayerUpload"
+                  - "ecr:PutImage"
+                  - "ecr:UploadLayerPart"
+                Resource: !GetAtt WorkerRepository.Arn
+              - Effect: Allow
+                Action:
+                  - "sagemaker:CreatePipeline"
+                  - "sagemaker:UpdatePipeline"
+                  - "sagemaker:DescribePipeline"
+                  - "sagemaker:ListPipelineVersions"
+                  - "sagemaker:StartPipelineExecution"
+                Resource: !Sub "arn:${AWS::Partition}:sagemaker:${AWS::Region}:${AWS::AccountId}:pipeline/${NamePrefix}-training"
+              - Effect: Allow
+                Action: "sagemaker:DescribePipelineExecution"
+                Resource: !Sub "arn:${AWS::Partition}:sagemaker:${AWS::Region}:${AWS::AccountId}:pipeline/${NamePrefix}-training/execution/*"
+              - Effect: Allow
+                Action: "iam:PassRole"
+                Resource: !GetAtt TrainingPipelineRole.Arn
+                Condition:
+                  StringEquals: {"iam:PassedToService": sagemaker.amazonaws.com}
+              - Effect: Allow
+                Action: ["scheduler:GetSchedule", "scheduler:CreateSchedule", "scheduler:UpdateSchedule"]
+                Resource: !Sub "arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/${NamePrefix}-retrain"
+              - Effect: Allow
+                Action: "iam:PassRole"
+                Resource: !GetAtt SchedulerRole.Arn
+                Condition:
+                  StringEquals: {"iam:PassedToService": scheduler.amazonaws.com}
+  ReleaseBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${NamePrefix}-release"
+      ServiceRole: !GetAtt BuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra/aws/buildspec.yml
+      TimeoutInMinutes: 60
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: "aws/codebuild/standard:7.0"
+        ComputeType: BUILD_GENERAL1_SMALL
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: MODEL_BUCKET
+            Value: !Ref ModelArtifacts
+          - Name: SOURCE_KEY
+            Value: !Ref DatasetKey
+          - Name: WORKER_REPO
+            Value: !Ref WorkerRepository
+          - Name: WORKER_URI
+            Value: !GetAtt WorkerRepository.RepositoryUri
+          - Name: TRAINING_PIPELINE
+            Value: !Sub "${NamePrefix}-training"
+          - Name: TRAINING_PIPELINE_ROLE
+            Value: !GetAtt TrainingPipelineRole.Arn
+          - Name: PROCESSING_ROLE
+            Value: !GetAtt ProcessingRole.Arn
+          - Name: MODEL_GROUP
+            Value: !Sub "${NamePrefix}-models"
+          - Name: STAGING_MODEL_GROUP
+            Value: !Sub "${NamePrefix}-validation"
+          - Name: RETRAINING_NAME
+            Value: !Sub "${NamePrefix}-retrain"
+          - Name: RETRAINING_EXPRESSION
+            Value: !Ref RetrainingExpression
+          - Name: RETRAINING_TIMEZONE
+            Value: !Ref RetrainingTimezone
+          - Name: SCHEDULER_ROLE
+            Value: !GetAtt SchedulerRole.Arn
+  DeliveryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: codepipeline.amazonaws.com}
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: DeliverPipeline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ["codeconnections:UseConnection", "codestar-connections:UseConnection"]
+                Resource: !Ref ConnectionArn
+                Condition:
+                  StringEqualsIfExists:
+                    "codeconnections:FullRepositoryId": !Ref SourceRepository
+                    "codeconnections:BranchName": !Ref SourceBranch
+                    "codeconnections:ProviderPermissionsRequired": read_only
+                    "codestar-connections:FullRepositoryId": !Ref SourceRepository
+                    "codestar-connections:BranchName": !Ref SourceBranch
+                    "codestar-connections:ProviderPermissionsRequired": read_only
+              - Effect: Allow
+                Action: ["s3:GetBucketLocation", "s3:GetBucketVersioning", "s3:GetBucketAcl"]
+                Resource: !GetAtt PipelineArtifacts.Arn
+              - Effect: Allow
+                Action: ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject"]
+                Resource: !Sub "${PipelineArtifacts.Arn}/*"
+              - Effect: Allow
+                Action: ["kms:Decrypt", "kms:DescribeKey", "kms:Encrypt", "kms:GenerateDataKey", "kms:ReEncrypt*"]
+                Resource: !GetAtt ArtifactKey.Arn
+              - Effect: Allow
+                Action: ["codebuild:StartBuild", "codebuild:BatchGetBuilds", "codebuild:StopBuild"]
+                Resource: !GetAtt ReleaseBuild.Arn
+  DeliveryPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub "${NamePrefix}-delivery"
+      RoleArn: !GetAtt DeliveryRole.Arn
+      PipelineType: V2
+      ExecutionMode: QUEUED
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PipelineArtifacts
+        EncryptionKey:
+          Type: KMS
+          Id: !GetAtt ArtifactKey.Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: GitHub
+              ActionTypeId: {Category: Source, Owner: AWS, Provider: CodeStarSourceConnection, Version: "1"}
+              Configuration:
+                ConnectionArn: !Ref ConnectionArn
+                FullRepositoryId: !Ref SourceRepository
+                BranchName: !Ref SourceBranch
+                OutputArtifactFormat: CODE_ZIP
+                DetectChanges: "true"
+              OutputArtifacts:
+                - Name: SourceCode
+        - Name: VerifyAndRelease
+          Actions:
+            - Name: CodeBuild
+              ActionTypeId: {Category: Build, Owner: AWS, Provider: CodeBuild, Version: "1"}
+              Configuration:
+                ProjectName: !Ref ReleaseBuild
+              InputArtifacts:
+                - Name: SourceCode
+
+Outputs:
+  DeliveryPipelineName:
+    Description: CodePipeline that builds and releases the training pipeline.
+    Value: !Ref DeliveryPipeline
+  ModelArtifactsBucket:
+    Description: Versioned dataset, training artifacts, and release manifests.
+    Value: !Ref ModelArtifacts
+  DatasetUri:
+    Description: Labeled CSV used by scheduled retraining.
+    Value: !Sub "s3://${ModelArtifacts}/${DatasetKey}"
+  TrainingPipelineName:
+    Description: SageMaker pipeline created by the first successful release build.
+    Value: !Sub "${NamePrefix}-training"
+  RetrainingScheduleName:
+    Description: EventBridge schedule managed by CodeBuild when retraining is enabled.
+    Value: !Sub "${NamePrefix}-retrain"

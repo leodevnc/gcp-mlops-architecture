@@ -12,6 +12,7 @@ dependencies = [
 
 [dependency-groups]
 dev = ["httpx2==2.16.0"]
+aws = ["boto3==1.44.3"]
 gcp = [
     "google-cloud-aiplatform==2.9.0",
     "google-cloud-storage==3.17.1",

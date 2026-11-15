@@ -1,0 +1,19 @@
+version: 0.2
+
+env:
+  shell: bash
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - python -m pip install uv==0.13.6
+      - uv sync --locked --group aws
+  pre_build:
+    commands:
+      - uv run --locked --group aws python -m unittest discover -s tests -v
+      - uv run --locked --group aws python -m unittest discover -s tests/aws -v
+  build:
+    commands:
+      - bash scripts/release-aws.sh
