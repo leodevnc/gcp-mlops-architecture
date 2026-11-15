@@ -29,6 +29,7 @@ def compile_pipeline(image_uri: str, output: Path) -> None:
         prepared: Input[Dataset],
         candidate: Input[Model],
         max_mae: float,
+        require_approval: bool,
         report: Output[Artifact],
         metrics: Output[Metrics],
     ) -> bool:
@@ -40,6 +41,11 @@ def compile_pipeline(image_uri: str, output: Path) -> None:
         metrics.log_metric("mae_limit_minutes", assessment.max_mae)
         metrics.log_metric("holdout_rows", assessment.holdout_rows)
         report.metadata["passed"] = assessment.passed
+        if require_approval and not assessment.passed:
+            raise ValueError(
+                f"Candidate MAE {assessment.mae:.3f} min did not pass the quality gate "
+                f"(baseline {assessment.baseline_mae:.3f}, limit {assessment.max_mae:.3f})."
+            )
         return assessment.passed
 
     @dsl.component(base_image=image_uri, install_kfp_package=False)
@@ -68,7 +74,13 @@ def compile_pipeline(image_uri: str, output: Path) -> None:
 
     @dsl.pipeline(name="delivery-time-continuous-training")
     def continuous_training(
-        source_uri: str, project: str, region: str, model_id: str, max_mae: float, seed: int = 42
+        source_uri: str,
+        project: str,
+        region: str,
+        model_id: str,
+        max_mae: float,
+        seed: int = 42,
+        require_approval: bool = False,
     ):
         prepared = prepare_data(source_uri=source_uri, seed=seed).set_caching_options(False)
         candidate = train_model(prepared=prepared.outputs["prepared"]).set_caching_options(False)
@@ -76,6 +88,7 @@ def compile_pipeline(image_uri: str, output: Path) -> None:
             prepared=prepared.outputs["prepared"],
             candidate=candidate.outputs["candidate"],
             max_mae=max_mae,
+            require_approval=require_approval,
         ).set_caching_options(False)
         with dsl.If(evaluation.outputs["Output"] == True, name="quality-gate-passed"):
             register_model(
